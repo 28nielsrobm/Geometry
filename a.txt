@@ -1,0 +1,21 @@
+{
+  "name": "level1",
+  "length": 4200,
+  "obstacles": [
+    { "type": "platform", "x": 0,   "w": 100, "h": 14, "y": 260 },
+    { "type": "spike",    "x": 140, "w": 36,  "h": 52, "y": 330 },
+    { "type": "platform", "x": 210, "w": 100, "h": 14, "y": 240 },
+    { "type": "platform", "x": 360, "w": 100, "h": 14, "y": 220 },
+    { "type": "spike",    "x": 520, "w": 36,  "h": 52, "y": 330 },
+    { "type": "platform", "x": 620, "w": 110, "h": 14, "y": 220 },
+    { "type": "platform", "x": 800, "w": 90,  "h": 14, "y": 200 },
+    { "type": "spike",    "x": 980, "w": 36,  "h": 52, "y": 330 },
+    { "type": "platform", "x": 1080,"w": 140, "h": 14, "y": 200 },
+    { "type": "platform", "x": 1280,"w": 100, "h": 14, "y": 180 },
+    { "type": "platform", "x": 1520,"w": 90,  "h": 14, "y": 200 },
+    { "type": "spike",    "x": 1750,"w": 36,  "h": 52, "y": 330 },
+    { "type": "platform", "x": 1840,"w": 120, "h": 14, "y": 200 },
+    { "type": "platform", "x": 2040,"w": 100, "h": 14, "y": 220 },
+    { "type": "platform", "x": 2260,"w": 140, "h": 14, "y": 180 }
+  ]
+}
