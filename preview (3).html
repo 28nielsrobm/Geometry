@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Mini Geometry Dash — Level Loader</title>
+<style>
+  :root{ --bg:#111; }
+  html,body{ height:100%; margin:0; background:var(--bg); font-family:Inter, Arial, sans-serif; color:#fff; }
+  #ui { position: absolute; left: 12px; top: 12px; z-index: 20; user-select: none; }
+  canvas{ display:block; margin:0 auto; background:transparent; touch-action:none; }
+  .center { position: absolute; left: 50%; transform: translateX(-50%); top: 12px; z-index: 10; pointer-events: none; }
+  #help { position: absolute; right: 12px; top: 12px; z-index:10; text-align:right; }
+  select, button { background:rgba(255,255,255,0.08); color:white; border:1px solid rgba(255,255,255,0.08); padding:6px 8px; border-radius:6px; cursor:pointer; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div>
+    Level:
+    <select id="levelSelect"></select>
+    <button id="reloadBtn">Reload Level</button>
+  </div>
+  <div style="margin-top:8px">Score: <span id="score">0</span> &nbsp; Best: <span id="best">0</span></div>
+</div>
+<div class="center">
+  <h3 style="margin:0; pointer-events:none;">Mini Geometry Dash — Levels</h3>
+</div>
+<div id="help">
+  <div>SPACE / ENTER / TAP = jump · R = restart</div>
+</div>
+
+<canvas id="c"></canvas>
+
+<script>
+(() => {
+  // --- canvas + DPR setup ---
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const DPR = Math.max(1, window.devicePixelRatio || 1);
+
+  function resize() {
+    const w = Math.min(window.innerWidth, 1200);
+    const h = Math.min(window.innerHeight, 720);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    canvas.width = Math.floor(w * DPR);
+    canvas.height = Math.floor(h * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // --- UI elements ---
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const levelSelect = document.getElementById('levelSelect');
+  const reloadBtn = document.getElementById('reloadBtn');
+
+  const bestKey = 'mini-gd-best';
+  let best = parseInt(localStorage.getItem(bestKey) || '0', 10);
+  if (!Number.isFinite(best)) best = 0;
+  bestEl.textContent = best;
+
+  // --- constants & state ---
+  const groundHeight = 70;
+  const gravity = 0.6;
+  const jumpForce = -13;
+  const forwardSpeedBase = 4.3;
+
+  let currentLevelName = 'level1';
+  let currentLevelData = null;
+
+  // Level state
+  let levelLength = 4200;
+  let distanceTravelled = 0;
+  let endPortalX = canvas.clientWidth + levelLength;
+  let endSpawned = false;
+  let levelComplete = false;
+
+  const player = { x: 120, y: 0, size: 44, vy: 0, grounded: false, rotation: 0, rotationSpeed: 0 };
+
+  let obstacles = []; // populated from level data
+  let t = 0;
+  let gameOver = false;
+  let score = 0;
+
+  let hueOffset = 0;
+  let nextClusterId = 1;
+  const scoredClusters = new Set();
+  let particles = [];
+
+  // --- small audio system ---
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  let audioCtx = null;
+  function ensureAudio() { if (!audioCtx) audioCtx = new AudioCtx(); }
+  function beep(freq=440, duration=0.08, type='sine', when=0) {
+    try {
+      ensureAudio();
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type;
+      o.frequency.value = freq;
+      g.gain.value = 0.0001;
+      o.connect(g); g.connect(audioCtx.destination);
+      const now = audioCtx.currentTime + when;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.15, now + 0.01);
+      o.start(now);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+      o.stop(now + duration + 0.02);
+    } catch (err) { /* audio blocked until interaction */ }
+  }
+
+  // --- helper functions ---
+  function rand(min, max) { return Math.random() * (max - min) + min; }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  // --- embedded fallback levels (used if fetch fails or you open file://) ---
+  const EMBED_LEVELS = {
+    "level1": {
+      "name": "level1",
+      "length": 4200,
+      "obstacles": [
+        { "type": "platform", "x": 0,   "w": 100, "h": 14, "y": 260 },
+        { "type": "spike",    "x": 140, "w": 36,  "h": 52, "y": 330 },
+        { "type": "platform", "x": 210, "w": 100, "h": 14, "y": 240 },
+        { "type": "platform", "x": 360, "w": 100, "h": 14, "y": 220 },
+        { "type": "spike",    "x": 520, "w": 36,  "h": 52, "y": 330 },
+        { "type": "platform", "x": 620, "w": 110, "h": 14, "y": 220 },
+        { "type": "platform", "x": 800, "w": 90,  "h": 14, "y": 200 },
+        { "type": "spike",    "x": 980, "w": 36,  "h": 52, "y": 330 },
+        { "type": "platform", "x": 1080,"w": 140, "h": 14, "y": 200 },
+        { "type": "platform", "x": 1280,"w": 100, "h": 14, "y": 180 },
+        { "type": "platform", "x": 1520,"w": 90,  "h": 14, "y": 200 },
+        { "type": "spike",    "x": 1750,"w": 36,  "h": 52, "y": 330 },
+        { "type": "platform", "x": 1840,"w": 120, "h": 14, "y": 200 },
+        { "type": "platform", "x": 2040,"w": 100, "h": 14, "y": 220 },
+        { "type": "platform", "x": 2260,"w": 140, "h": 14, "y": 180 }
+      ]
+    },
+    "level2": {
+      "name": "level2",
+      "length": 5200,
+      "obstacles": [
+        { "type":"platform","x":0,"w":90,"h":14,"y":240},
+        { "type":"platform","x":140,"w":110,"h":14,"y":240},
+        { "type":"spike","x":300,"w":36,"h":52,"y":330},
+        { "type":"platform","x":380,"w":100,"h":14,"y":220},
+        { "type":"platform","x":520,"w":80,"h":14,"y":200},
+        { "type":"platform","x":700,"w":120,"h":14,"y":200},
+        { "type":"spike","x":890,"w":36,"h":52,"y":330},
+        { "type":"platform","x":980,"w":100,"h":14,"y":180},
+        { "type":"platform","x":1200,"w":100,"h":14,"y":200},
+        { "type":"platform","x":1420,"w":130,"h":14,"y":200},
+        { "type":"spike","x":1620,"w":36,"h":52,"y":330},
+        { "type":"platform","x":1760,"w":140,"h":14,"y":180}
+      ]
+    }
+  };
+
+  // list of known level names (used for selector)
+  const KNOWN_LEVELS = ['level1','level2'];
+
+  // populate level selector
+  function populateLevelSelect() {
+    levelSelect.innerHTML = '';
+    KNOWN_LEVELS.forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name; opt.textContent = name;
+      levelSelect.appendChild(opt);
+    });
+    levelSelect.value = currentLevelName;
+  }
+  populateLevelSelect();
+
+  // --- level loading/parsing ---
+  async function loadLevelByName(name) {
+    currentLevelName = name;
+    // try to fetch external file first
+    try {
+      const resp = await fetch(`levels/${name}.json`, {cache: "no-store"});
+      if (!resp.ok) throw new Error('no file');
+      const data = await resp.json();
+      applyLevelData(data);
+      console.log('Level loaded from /levels/' + name + '.json');
+      return;
+    } catch (err) {
+      // fallback to embedded level
+      if (EMBED_LEVELS[name]) {
+        applyLevelData(EMBED_LEVELS[name]);
+        console.log('Fallback to embedded level: ' + name);
+        return;
+      } else {
+        alert('Level not found: ' + name);
+      }
+    }
+  }
+
+  function applyLevelData(data) {
+    // clear runtime state, create obstacle objects in world coordinates
+    obstacles = [];
+    nextClusterId = 1;
+    scoredClusters.clear();
+
+    currentLevelData = data;
+    levelLength = data.length || levelLength;
+    distanceTravelled = 0;
+    endPortalX = canvas.clientWidth + levelLength;
+    endSpawned = false;
+    levelComplete = false;
+    gameOver = false;
+    score = 0;
+    scoreEl.textContent = '0';
+    t = 0;
+    particles = [];
+
+    // convert level obstacle offsets to world x positions (canvas.clientWidth + offset)
+    for (const obsDef of data.obstacles) {
+      const worldX = Math.round(canvas.clientWidth + (obsDef.x || 0));
+      obstacles.push({
+        type: obsDef.type,
+        x: worldX,
+        w: obsDef.w,
+        h: obsDef.h,
+        y: obsDef.y,
+        clusterId: nextClusterId++
+      });
+    }
+  }
+
+  // --- reset / restart uses current level ---
+  function reset() {
+    // re-apply current level to recreate obstacles identical every run
+    if (currentLevelData) applyLevelData(currentLevelData);
+    score = 0; scoreEl.textContent = '0';
+    player.y = canvas.clientHeight - groundHeight - player.size;
+    player.vy = 0; player.grounded = true;
+    player.rotation = 0; player.rotationSpeed = 0;
+    t = 0; gameOver = false; levelComplete = false;
+    nextClusterId = 1;
+    scoredClusters.clear();
+    distanceTravelled = 0;
+    endPortalX = canvas.clientWidth + levelLength;
+    endSpawned = false;
+    particles = [];
+  }
+
+  // --- input ---
+  function doJump() {
+    if (gameOver || levelComplete) return;
+    if (player.grounded) {
+      player.vy = jumpForce;
+      player.grounded = false;
+      player.rotationSpeed = -player.vy * 0.02 + 0.05 + Math.random() * 0.06;
+      beep(880, 0.06, 'sine');
+    }
+  }
+  function restart() { reset(); beep(160, 0.18, 'square'); }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); doJump(); }
+    if (e.code === 'KeyR') { restart(); }
+  });
+  canvas.addEventListener('pointerdown', (e) => {
+    if (audioCtx === null) try { ensureAudio(); } catch {}
+    if (gameOver || levelComplete) { restart(); return; }
+    doJump();
+  });
+
+  // level selector behaviour
+  levelSelect.addEventListener('change', () => {
+    loadLevelByName(levelSelect.value);
+  });
+  reloadBtn.addEventListener('click', () => {
+    reset();
+  });
+
+  // --- polygon SAT (spike collision) ---
+  function polygonAxes(points) {
+    const axes = [];
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i];
+      const b = points[(i+1) % points.length];
+      const edgeX = b[0] - a[0];
+      const edgeY = b[1] - a[1];
+      const nx = -edgeY, ny = edgeX;
+      const len = Math.hypot(nx, ny) || 1;
+      axes.push([nx / len, ny / len]);
+    }
+    return axes;
+  }
+  function project(points, axis) {
+    let min = Infinity, max = -Infinity;
+    for (const p of points) {
+      const v = p[0]*axis[0] + p[1]*axis[1];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    return [min, max];
+  }
+  function overlap(p1, p2) {
+    return !(p1[1] < p2[0] || p2[1] < p1[0]);
+  }
+  function polygonsCollide(polyA, polyB) {
+    const axes = [...polygonAxes(polyA), ...polygonAxes(polyB)];
+    for (const axis of axes) {
+      const pA = project(polyA, axis);
+      const pB = project(polyB, axis);
+      if (!overlap(pA, pB)) return false;
+    }
+    return true;
+  }
+  function rectToPoly(x, y, w, h) {
+    return [[x,y],[x+w,y],[x+w,y+h],[x,y+h]];
+  }
+
+  // --- particles ---
+  function spawnParticles(x, y, n=18) {
+    for (let i=0;i<n;i++){
+      particles.push({ x, y, vx: rand(-3,3), vy: rand(-6, -1), life: rand(40, 90), size: rand(2,6), hue: Math.floor(rand(0,360)) });
+    }
+  }
+
+  // --- main update/render loop ---
+  function update() {
+    t++;
+    const cw = canvas.clientWidth, ch = canvas.clientHeight;
+    const groundTop = ch - groundHeight;
+    const speed = forwardSpeedBase + Math.min(3.2, t / 2500);
+    hueOffset = (hueOffset + 0.4) % 360;
+
+    // progress / portal movement
+    if (!levelComplete && !gameOver) {
+      distanceTravelled += speed;
+      endPortalX -= speed;
+    }
+
+    // physics
+    if (!levelComplete) {
+      player.vy += gravity;
+      player.y += player.vy;
+      if (player.y >= groundTop - player.size) {
+        player.y = groundTop - player.size;
+        player.vy = 0;
+        player.grounded = true;
+        player.rotation *= 0.96;
+      } else {
+        player.grounded = false;
+      }
+    }
+
+    player.rotation += player.rotationSpeed;
+    player.rotationSpeed *= 0.99;
+
+    // move obstacles
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const obs = obstacles[i];
+      if (!levelComplete && !gameOver) obs.x -= speed;
+
+      // scoring by cluster (first pass)
+      if (!scoredClusters.has(obs.clusterId) && (obs.x + obs.w) < player.x - 6) {
+        scoredClusters.add(obs.clusterId);
+        score += 1;
+        scoreEl.textContent = score;
+        if (score > best) { best = score; localStorage.setItem(bestKey, best); bestEl.textContent = best; }
+        beep(1100, 0.06, 'sine');
+      }
+
+      // remove offscreen
+      if (obs.x + obs.w < -120) { obstacles.splice(i,1); continue; }
+
+      // collision
+      if (!gameOver && !levelComplete) {
+        const px = player.x, py = player.y, ps = player.size;
+        if (obs.type === 'spike') {
+          const ax = obs.x, ay = obs.y + obs.h;
+          const bx = obs.x + obs.w/2, by = obs.y;
+          const cx = obs.x + obs.w, cy = obs.y + obs.h;
+          if (polygonsCollide([[ax,ay],[bx,by],[cx,cy]], rectToPoly(px,py,ps,ps))) {
+            gameOver = true; beep(120, 0.36, 'sawtooth');
+          }
+        } else if (obs.type === 'platform') {
+          const psBottom = player.y + player.size;
+          const prevBottom = player.y + player.size - player.vy;
+          const overlapsX = !(px + ps <= obs.x || px >= obs.x + obs.w);
+          const touchingTop = overlapsX && prevBottom <= obs.y && psBottom >= obs.y;
+          if (touchingTop && player.vy >= -8) {
+            player.y = obs.y - player.size;
+            player.vy = 0;
+            player.grounded = true;
+            player.rotationSpeed *= 0.6;
+          } else {
+            if ( !(px + ps <= obs.x || px >= obs.x + obs.w || py + ps <= obs.y || py >= obs.y + obs.h) ) {
+              gameOver = true; beep(120, 0.36, 'sawtooth');
+            }
+          }
+        } else { // generic block (if any)
+          if ( !(px + ps <= obs.x || px >= obs.x + obs.w || py + ps <= obs.y || py >= obs.y + obs.h) ) {
+            gameOver = true; beep(120, 0.36, 'sawtooth');
+          }
+        }
+      }
+    }
+
+    // particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.vy += 0.12; p.x += p.vx; p.y += p.vy; p.life--;
+      if (p.life <= 0) particles.splice(i,1);
+    }
+
+    // portal collision
+    if (!levelComplete && !gameOver) {
+      const portalW = 84;
+      if ((endPortalX <= player.x + player.size && endPortalX + portalW >= player.x) || (endPortalX + portalW < player.x)) {
+        levelComplete = true;
+        beep(520, 0.3, 'triangle');
+        spawnParticles(player.x + player.size/2, player.y + player.size/2, 26);
+      }
+    }
+
+    // gameOver tumbles
+    if (gameOver) player.rotationSpeed += 0.02;
+  }
+
+  // --- rendering (same visuals as before) ---
+  function drawBackground() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const g = ctx.createLinearGradient(0, 0, w, h);
+    const baseHue = Math.round(hueOffset);
+    g.addColorStop(0, `hsl(${(baseHue+0)}, 80%, 35%)`);
+    g.addColorStop(0.25, `hsl(${(baseHue+60)}, 70%, 40%)`);
+    g.addColorStop(0.5, `hsl(${(baseHue+140)}, 75%, 45%)`);
+    g.addColorStop(0.75, `hsl(${(baseHue+220)}, 70%, 42%)`);
+    g.addColorStop(1, `hsl(${(baseHue+300)}, 78%, 36%)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+    ctx.save(); ctx.globalAlpha = 0.06; ctx.fillStyle = '#fff';
+    const stripeW = 200; const offset = (t * 0.8) % (stripeW*2);
+    for (let x = -stripeW*2 + offset; x < w + stripeW*2; x += stripeW) {
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x + stripeW * 0.6, 0);
+      ctx.lineTo(x + stripeW * 1.2, h); ctx.lineTo(x + stripeW * 0.6, h); ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawGround() {
+    const h = canvas.clientHeight;
+    ctx.fillStyle = 'rgba(16,16,16,0.85)';
+    ctx.fillRect(0, h - groundHeight, canvas.clientWidth, groundHeight);
+    ctx.fillStyle = 'rgba(255,255,255,0.03)';
+    for (let x = 0; x < canvas.clientWidth; x += 30) ctx.fillRect(x, h - groundHeight + 2, 10, 2);
+  }
+
+  function drawPlayer() {
+    ctx.save();
+    const px = player.x + player.size/2, py = player.y + player.size/2;
+    ctx.translate(px, py); ctx.rotate(player.rotation);
+    ctx.fillStyle = '#00d1ff'; ctx.fillRect(-player.size/2, -player.size/2, player.size, player.size);
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 2;
+    ctx.strokeRect(-player.size/2+4, -player.size/2+4, player.size-8, player.size-8);
+    ctx.restore();
+  }
+
+  function drawObstacles() {
+    for (const obs of obstacles) {
+      if (obs.type === 'block') {
+        ctx.fillStyle = '#ff6b6b'; ctx.fillRect(Math.round(obs.x), Math.round(obs.y), obs.w, obs.h);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(Math.round(obs.x)+6, Math.round(obs.y)+6, Math.max(8, obs.w-12), Math.max(8, obs.h-12));
+      } else if (obs.type === 'spike') {
+        const ax = obs.x, ay = obs.y + obs.h, bx = obs.x + obs.w/2, by = obs.y, cx = obs.x + obs.w;
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.lineTo(cx, ay); ctx.closePath();
+        ctx.fillStyle = '#ffec59'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#bf8f12'; ctx.stroke(); drawSmiley(bx, by - 10, 1.1);
+      } else if (obs.type === 'platform') {
+        ctx.save(); ctx.fillStyle = '#9ad66a'; ctx.fillRect(Math.round(obs.x), Math.round(obs.y), obs.w, obs.h);
+        ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillRect(Math.round(obs.x)+6, Math.round(obs.y)+2, Math.max(8, obs.w-12), Math.max(4, obs.h-4));
+        ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(Math.round(obs.x), Math.round(obs.y+obs.h), obs.w, 3); ctx.restore();
+      }
+    }
+  }
+
+  function drawSmiley(centerX, topY, scale = 1) {
+    const r = 8 * scale; ctx.beginPath(); ctx.fillStyle = 'yellow'; ctx.arc(centerX, topY + r + 2, r, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(centerX - r/3, topY + r, 1.7*scale, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(centerX + r/3, topY + r, 1.7*scale, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(centerX, topY + r + 2.2*scale, 3.6*scale, 0, Math.PI); ctx.lineWidth = 1.6*scale; ctx.strokeStyle = '#222'; ctx.stroke();
+  }
+
+  function drawPortal() {
+    const portalW = 84; const portalX = Math.round(endPortalX); const portalY = canvas.clientHeight - groundHeight - 120; const cx = portalX + portalW/2;
+    ctx.save();
+    const radial = ctx.createRadialGradient(cx, portalY, 6, cx, portalY, 120);
+    radial.addColorStop(0, 'rgba(160,255,255,0.9)'); radial.addColorStop(0.45, 'rgba(80,160,255,0.45)'); radial.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = radial; ctx.beginPath(); ctx.arc(cx, portalY, 80, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.lineWidth = 8; ctx.strokeStyle = 'rgba(220,255,255,0.95)'; ctx.arc(cx, portalY, 36, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(40,40,50,0.9)'; const phase = (t * 0.06) % (Math.PI*2);
+    for (let a=0;a<Math.PI*2;a+=Math.PI/3) { const r1 = 18 + Math.sin(a*3 + phase)*6; ctx.moveTo(cx + Math.cos(a+phase)*r1, portalY + Math.sin(a+phase)*r1); ctx.arc(cx, portalY, r1, a+phase, a+phase+0.02); }
+    ctx.stroke(); ctx.font = 'bold 26px system-ui, Arial'; ctx.fillStyle = '#014'; ctx.textAlign = 'center'; ctx.fillText('GO', cx, portalY + 9);
+    ctx.restore();
+  }
+
+  function drawHUD() {
+    if (gameOver) {
+      ctx.save(); ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, canvas.clientHeight/2 - 60, canvas.clientWidth, 140);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 44px system-ui, Arial'; ctx.textAlign = 'center'; ctx.fillText('GAME OVER', canvas.clientWidth/2, canvas.clientHeight/2 - 6);
+      ctx.font = '18px system-ui, Arial'; ctx.fillText('Press R or Tap to Restart', canvas.clientWidth/2, canvas.clientHeight/2 + 28); ctx.restore();
+    } else if (levelComplete) {
+      ctx.save(); ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, canvas.clientHeight/2 - 80, canvas.clientWidth, 180);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 46px system-ui, Arial'; ctx.textAlign = 'center'; ctx.fillText('LEVEL COMPLETE', canvas.clientWidth/2, canvas.clientHeight/2 - 8);
+      ctx.font = '18px system-ui, Arial'; ctx.fillText('Nice! Press R or Tap to Play Again', canvas.clientWidth/2, canvas.clientHeight/2 + 28); ctx.restore();
+    }
+  }
+
+  function drawParticles() { for (const p of particles) { ctx.beginPath(); ctx.fillStyle = `hsl(${p.hue} 80% 60% / 1)`; ctx.fillRect(p.x, p.y, p.size, p.size); } }
+
+  function render() {
+    drawBackground();
+    ctx.save(); ctx.globalAlpha = 0.12; ctx.fillStyle = '#000'; ctx.fillRect(0, canvas.clientHeight - groundHeight - 6, canvas.clientWidth, 6); ctx.restore();
+    if (endPortalX < canvas.clientWidth + 200) drawPortal();
+    drawObstacles(); drawPlayer(); drawGround(); drawParticles(); drawHUD();
+  }
+
+  function loop() { update(); render(); requestAnimationFrame(loop); }
+  requestAnimationFrame(loop);
+
+  // init
+  (function init() { player.y = canvas.clientHeight - groundHeight - player.size; })();
+
+  // load default level on startup (tries external file first)
+  loadLevelByName(currentLevelName);
+
+  // visibility audio suspend/resume
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && audioCtx) try { audioCtx.suspend(); } catch(e) {}
+    else if (!document.hidden && audioCtx) try { audioCtx.resume(); } catch(e) {}
+  });
+
+})();
+</script>
+</body>
+</html>
